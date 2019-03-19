@@ -162,9 +162,7 @@ class RxBus private constructor() {
         if (!subscriberMethods.contains(subscriberMethod)) {
             subscriberMethods.add(subscriberMethod)
         }
-        Log.d("addSubscriberToMap:", subscriberMethods.toString())
         subscriberMethods.sort()
-        Log.d("addSubscriberToMap  sort:", subscriberMethods.toString())
     }
 
     /**
