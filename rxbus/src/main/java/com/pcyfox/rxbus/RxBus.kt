@@ -1,5 +1,6 @@
 package com.pcyfox.rxbus
 
+import android.util.Log
 import io.reactivex.*
 import io.reactivex.Observable
 import io.reactivex.android.schedulers.AndroidSchedulers
@@ -39,7 +40,7 @@ class RxBus private constructor() {
      */
     private fun <T> toObservable(code: Int, eventType: Class<T>): Flowable<T> {
         return bus.toFlowable(BackpressureStrategy.BUFFER).ofType(Message::class.java)
-                .filter { o -> o.code == code && eventType.isInstance(o.`object`) }.map { o -> o.`object` }.cast(eventType)
+            .filter { o -> o.code == code && eventType.isInstance(o.`object`) }.map { o -> o.`object` }.cast(eventType)
     }
 
     /**
@@ -50,7 +51,9 @@ class RxBus private constructor() {
             val observable = bus.ofType(eventType)
             val event = mStickyEventMap[eventType]
             return if (event != null) {
-                Observable.merge(observable, Observable.create { emitter -> emitter.onNext(eventType.cast(event)!!) })
+                Observable.merge(
+                    observable,
+                    Observable.create { emitter -> emitter.onNext(eventType.cast(event)!!) })
             } else {
                 observable
             }
@@ -86,6 +89,7 @@ class RxBus private constructor() {
 
 
     /**
+     *
      * 注册
      * @param subscriber 订阅者
      */
@@ -94,28 +98,32 @@ class RxBus private constructor() {
         val methods = subClass.declaredMethods
         for (method in methods) {
             if (method.isAnnotationPresent(Subscribe::class.java)) {
-                //获得参数类型
+                //获得订阅参数类型
                 val parameterType = method.parameterTypes
                 //参数不为空 且参数个数为1
                 if (parameterType.size == 1) {
                     val eventType = parameterType[0]
-                    addEventTypeToMap(subscriber, eventType)
+                    addEventTypeToMap(subscriber, eventType)//将事件类型与订阅者绑定
                     val sub = method.getAnnotation(Subscribe::class.java)
                     val code = sub.code
                     val threadMode = sub.threadMode
-                    val subscriberMethod = SubscriberMethod(subscriber, method, eventType, code, threadMode)
-                    addSubscriberToMap(eventType, subscriberMethod)
-                    addSubscriber(subscriberMethod)
+                    val priority = sub.priority
+                    val subscriberMethod = SubscriberMethod(subscriber, method, eventType, code, threadMode, priority)
+                    addSubscriberToMap(eventType, subscriberMethod)//将事件类型与订阅方法绑定
+                    addSubscriberMethod(subscriberMethod)
+                    if (mStickyEventMap.containsKey(eventType)) {
+                        callEvent(subscriberMethod, mStickyEventMap[eventType]!!)
+                        //   post(mStickyEventMap[eventType]!!)
+                    }
                 } else if (parameterType.isEmpty()) {
                     val eventType = BusData::class.java
                     addEventTypeToMap(subscriber, eventType)
                     val sub = method.getAnnotation(Subscribe::class.java)
                     val code = sub.code
                     val threadMode = sub.threadMode
-
                     val subscriberMethod = SubscriberMethod(subscriber, method, eventType, code, threadMode)
                     addSubscriberToMap(eventType, subscriberMethod)
-                    addSubscriber(subscriberMethod)
+                    addSubscriberMethod(subscriberMethod)
                 }
             }
         }
@@ -131,7 +139,7 @@ class RxBus private constructor() {
         var eventTypes: MutableList<Class<*>>? = eventTypesBySubscriber[subscriber]
         if (eventTypes == null) {
             eventTypes = ArrayList<Class<*>>()
-            eventTypesBySubscriber.put(subscriber, eventTypes)
+            eventTypesBySubscriber[subscriber] = eventTypes
         }
 
         if (!eventTypes.contains(eventType)) {
@@ -146,15 +154,17 @@ class RxBus private constructor() {
      * @param subscriberMethod 注解方法信息
      */
     private fun addSubscriberToMap(eventType: Class<*>, subscriberMethod: SubscriberMethod) {
-        var subscriberMethods: MutableList<SubscriberMethod>? = subscriberMethodByEventType[eventType]
+        var subscriberMethods = subscriberMethodByEventType[eventType]
         if (subscriberMethods == null) {
-            subscriberMethods = ArrayList<SubscriberMethod>()
-            subscriberMethodByEventType.put(eventType, subscriberMethods)
+            subscriberMethods = arrayListOf()
+            subscriberMethodByEventType[eventType] = subscriberMethods
         }
-
         if (!subscriberMethods.contains(subscriberMethod)) {
             subscriberMethods.add(subscriberMethod)
         }
+        Log.d("addSubscriberToMap:", subscriberMethods.toString())
+        subscriberMethods.sort()
+        Log.d("addSubscriberToMap  sort:", subscriberMethods.toString())
     }
 
     /**
@@ -167,7 +177,7 @@ class RxBus private constructor() {
         var disposables: MutableList<Disposable>? = subscriptionsByEventType[eventType]
         if (disposables == null) {
             disposables = ArrayList<Disposable>()
-            subscriptionsByEventType.put(eventType, disposables)
+            subscriptionsByEventType[eventType] = disposables
         }
 
         if (!disposables.contains(disposable)) {
@@ -176,18 +186,18 @@ class RxBus private constructor() {
     }
 
     /**
-     * 用RxJava添加订阅者
-     * @param subscriberMethod d
+     * 用RxJava添加订阅方法
+     * @param subscriberMethod
      */
-    private fun addSubscriber(subscriberMethod: SubscriberMethod) {
+    private fun addSubscriberMethod(subscriberMethod: SubscriberMethod) {
         val flowable: Flowable<*>
         if (subscriberMethod.code == -1) {
             flowable = toObservable(subscriberMethod.eventType)
         } else {
             flowable = toObservable(subscriberMethod.code, subscriberMethod.eventType)
         }
-        val subscription = postToObservable(flowable, subscriberMethod)
-                .subscribe { o -> callEvent(subscriberMethod, o) }
+        val subscription = schedule(flowable, subscriberMethod).subscribe { o -> callEvent(subscriberMethod, o) }
+
         addSubscriptionToMap(subscriberMethod.subscriber.javaClass, subscription)
     }
 
@@ -199,7 +209,7 @@ class RxBus private constructor() {
      * *
      * @return Observable
      */
-    private fun postToObservable(observable: Flowable<*>, subscriberMethod: SubscriberMethod): Flowable<*> {
+    private fun schedule(observable: Flowable<*>, subscriberMethod: SubscriberMethod): Flowable<*> {
         val scheduler: Scheduler
         when (subscriberMethod.threadMode) {
             ThreadMode.MAIN -> scheduler = AndroidSchedulers.mainThread()
@@ -307,6 +317,7 @@ class RxBus private constructor() {
         post(event)
     }
 
+
     fun post(o: Any) {
         bus.onNext(o)
     }
@@ -317,12 +328,9 @@ class RxBus private constructor() {
 
     private inner class Message {
         var code: Int = 0
-            set
         var `object`: Any? = null
-            set
 
         constructor() {}
-
         constructor(code: Int, o: Any) {
             this.code = code
             this.`object` = o
